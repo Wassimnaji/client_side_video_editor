@@ -200,8 +200,11 @@ const App: FC = () => {
 
       // Read the result
       const fileData = (await ffmpeg.readFile("output.mp4")) as Uint8Array;
+      
+      const arrayBuffer = fileData.slice().buffer as ArrayBuffer;
+      
+      const blob = new Blob([arrayBuffer], { type: "video/mp4" });
 
-      const blob = new Blob([fileData], { type: "video/mp4" });
       const url = URL.createObjectURL(blob);
 
       if (downloadUrl) {
