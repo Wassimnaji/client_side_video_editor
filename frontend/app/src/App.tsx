@@ -207,11 +207,6 @@ const App: FC = () => {
           ? new Uint8Array(fileData)
           : new TextEncoder().encode(String(fileData));
 
-      const outputData =
-        fileData instanceof Uint8Array
-          ? fileData
-          : new TextEncoder().encode(String(fileData));
-
       const blob = new Blob([outputData], { type: "video/mp4" });
       const url = URL.createObjectURL(blob);
 
