@@ -201,13 +201,7 @@ const App: FC = () => {
       // Read the result
       const fileData = (await ffmpeg.readFile("output.mp4")) as Uint8Array;
 
-      // Normalize to a plain Uint8Array so Blob typing works with strict TS
-      const outputData: Uint8Array =
-        fileData instanceof Uint8Array
-          ? new Uint8Array(fileData)
-          : new TextEncoder().encode(String(fileData));
-
-      const blob = new Blob([outputData], { type: "video/mp4" });
+      const blob = new Blob([fileData], { type: "video/mp4" });
       const url = URL.createObjectURL(blob);
 
       if (downloadUrl) {
