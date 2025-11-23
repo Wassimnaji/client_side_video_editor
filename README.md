@@ -8,7 +8,7 @@
 
  [PlayGround](https://europanite.github.io/client_side_video_editor/)
 
-A Client-Side Video Editor for Free.
+A Client-Side Video Editor for Free. 
 
 ---
 
