@@ -1,9 +1,9 @@
-import {
+import React, {
   useEffect,
   useRef,
   useState,
-  type ChangeEvent,
-  type FC,
+  ChangeEvent,
+  FC,
 } from "react";
 
 // Use the new FFmpeg class API (v12+)
@@ -199,12 +199,13 @@ const App: FC = () => {
       ]);
 
       // Read the result
-      const fileData = (await ffmpeg.readFile("output.mp4")) as Uint8Array;
-      
-      const arrayBuffer = fileData.slice().buffer as ArrayBuffer;
-      
-      const blob = new Blob([arrayBuffer], { type: "video/mp4" });
+      const fileData = await ffmpeg.readFile("output.mp4"); // Uint8Array (FileData)
+      const outputData =
+        fileData instanceof Uint8Array
+          ? fileData
+          : new TextEncoder().encode(String(fileData));
 
+      const blob = new Blob([outputData], { type: "video/mp4" });
       const url = URL.createObjectURL(blob);
 
       if (downloadUrl) {
