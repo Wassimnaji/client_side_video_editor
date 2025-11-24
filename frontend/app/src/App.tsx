@@ -5,27 +5,22 @@ import {
   type ChangeEvent,
   type FC,
   type CSSProperties,
+  type PointerEvent as ReactPointerEvent,
 } from "react";
 
-// Use the new FFmpeg class API (v12+)
-import { FFmpeg } from "@ffmpeg/ffmpeg";
+type ExportState = "idle" | "exporting" | "done" | "error";
 
-// Create a single FFmpeg instance for the app
-const ffmpeg = new FFmpeg();
-
-type ExportState =
-  | "idle"
-  | "loading-engine"
-  | "ready"
-  | "exporting"
-  | "done"
-  | "error";
+type CropRect = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+};
 
 const App: FC = () => {
   const videoRef = useRef<HTMLVideoElement | null>(null);
 
-  const [ffmpegReady, setFfmpegReady] = useState(false);
-  const [engineState, setEngineState] = useState<ExportState>("loading-engine");
+  const [engineState, setEngineState] = useState<ExportState>("idle");
 
   const [videoFile, setVideoFile] = useState<File | null>(null);
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
@@ -35,44 +30,28 @@ const App: FC = () => {
   const [trimEnd, setTrimEnd] = useState<number>(0);
 
   const [statusMessage, setStatusMessage] = useState<string>(
-    "Loading video engine..."
+    "Load a video file to begin."
   );
   const [downloadUrl, setDownloadUrl] = useState<string | null>(null);
 
-  // Load FFmpeg.wasm once on mount
+  const [videoWidth, setVideoWidth] = useState<number | null>(null);
+  const [videoHeight, setVideoHeight] = useState<number | null>(null);
+
+  const [cropRect, setCropRect] = useState<CropRect | null>(null);
+  const [isDrawingCrop, setIsDrawingCrop] = useState(false);
+  const cropStartRef = useRef<{ x: number; y: number } | null>(null);
+
+  // Clean up object URLs on unmount
   useEffect(() => {
-    let cancelled = false;
-
-    const loadFfmpeg = async () => {
-      try {
-        setEngineState("loading-engine");
-        setStatusMessage(
-          "Loading video engine (FFmpeg.wasm). This can take a while on the first load..."
-        );
-
-        await ffmpeg.load();
-
-        if (!cancelled) {
-          setFfmpegReady(true);
-          setEngineState("ready");
-          setStatusMessage("Engine ready. Please load a video file.");
-        }
-      } catch (error) {
-        console.error("Failed to load FFmpeg:", error);
-        if (!cancelled) {
-          setEngineState("error");
-          setStatusMessage(
-            "Failed to load FFmpeg. Please check the console and your network."
-          );
-        }
+    return () => {
+      if (videoUrl) {
+        URL.revokeObjectURL(videoUrl);
+      }
+      if (downloadUrl) {
+        URL.revokeObjectURL(downloadUrl);
       }
     };
-
-    loadFfmpeg();
-
-    return () => {
-      cancelled = true;
-    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   /** Handle file selection */
@@ -98,10 +77,15 @@ const App: FC = () => {
     setTrimStart(0);
     setTrimEnd(0);
     setDuration(0);
+    setVideoWidth(null);
+    setVideoHeight(null);
+    setCropRect(null);
+    setIsDrawingCrop(false);
+    setEngineState("idle");
     setStatusMessage("Video loaded. Waiting for metadata...");
   };
 
-  /** When the video metadata is loaded, we know the duration */
+  /** When the video metadata is loaded, we know duration and dimensions */
   const handleLoadedMetadata = () => {
     if (!videoRef.current) return;
     const d = videoRef.current.duration;
@@ -109,10 +93,20 @@ const App: FC = () => {
       setStatusMessage("Could not read video duration.");
       return;
     }
+
+    const vw = videoRef.current.videoWidth || null;
+    const vh = videoRef.current.videoHeight || null;
+
     setDuration(d);
     setTrimStart(0);
     setTrimEnd(d);
-    setStatusMessage("Ready to edit. Adjust the trim range and export.");
+    setVideoWidth(vw);
+    setVideoHeight(vh);
+    setCropRect(null);
+    setIsDrawingCrop(false);
+    setStatusMessage(
+      "Ready to edit. Set the trim range, drag on the preview to select a crop, then export."
+    );
   };
 
   /** Helper: format seconds to mm:ss */
@@ -132,7 +126,6 @@ const App: FC = () => {
     let value = Number(event.target.value);
     if (!Number.isFinite(value)) return;
 
-    // Clamp to [0, duration] and not beyond current end
     value = Math.max(0, Math.min(value, duration));
     if (value > trimEnd) {
       value = trimEnd;
@@ -145,7 +138,6 @@ const App: FC = () => {
     let value = Number(event.target.value);
     if (!Number.isFinite(value)) return;
 
-    // Clamp to [0, duration] and not below current start
     value = Math.max(0, Math.min(value, duration));
     if (value < trimStart) {
       value = trimStart;
@@ -153,14 +145,128 @@ const App: FC = () => {
     setTrimEnd(value);
   };
 
-  /** Export trimmed clip using FFmpeg.wasm */
+  /** Pointer helpers for crop selection (drag rectangle on preview) */
+  const normalizePointerToVideo = (
+    event: ReactPointerEvent<HTMLVideoElement>
+  ): { x: number; y: number } | null => {
+    if (!videoRef.current || !videoWidth || !videoHeight) return null;
+
+    const bounds = videoRef.current.getBoundingClientRect();
+    if (bounds.width === 0 || bounds.height === 0) return null;
+
+    const relX = (event.clientX - bounds.left) / bounds.width;
+    const relY = (event.clientY - bounds.top) / bounds.height;
+
+    const clampedX = Math.max(0, Math.min(1, relX));
+    const clampedY = Math.max(0, Math.min(1, relY));
+
+    return {
+      x: clampedX * videoWidth,
+      y: clampedY * videoHeight,
+    };
+  };
+
+  const handleCropPointerDown = (event: ReactPointerEvent<HTMLVideoElement>) => {
+    if (!videoRef.current || !videoWidth || !videoHeight) return;
+    if (event.buttons !== 1) return;
+
+    const start = normalizePointerToVideo(event);
+    if (!start) return;
+
+    cropStartRef.current = start;
+    setCropRect({
+      x: start.x,
+      y: start.y,
+      width: 0,
+      height: 0,
+    });
+    setIsDrawingCrop(true);
+  };
+
+  const handleCropPointerMove = (event: ReactPointerEvent<HTMLVideoElement>) => {
+    if (!isDrawingCrop || !cropStartRef.current) return;
+    if (!videoWidth || !videoHeight) return;
+
+    event.preventDefault();
+
+    const current = normalizePointerToVideo(event);
+    if (!current) return;
+
+    const start = cropStartRef.current;
+    const x = Math.min(start.x, current.x);
+    const y = Math.min(start.y, current.y);
+    const width = Math.abs(current.x - start.x);
+    const height = Math.abs(current.y - start.y);
+
+    setCropRect({
+      x,
+      y,
+      width,
+      height,
+    });
+  };
+
+  const finishCrop = () => {
+    if (!isDrawingCrop) return;
+
+    setIsDrawingCrop(false);
+
+    setCropRect((prev) => {
+      if (!prev) return null;
+      if (prev.width < 4 || prev.height < 4) {
+        // Tiny rectangle: treat as "no crop"
+        return null;
+      }
+      return prev;
+    });
+  };
+
+  const handleCropPointerUp = () => {
+    finishCrop();
+  };
+
+  const handleCropPointerLeave = () => {
+    finishCrop();
+  };
+
+  const handleResetCrop = () => {
+    setCropRect(null);
+    setIsDrawingCrop(false);
+    cropStartRef.current = null;
+  };
+
+  /** Helper: choose a supported MediaRecorder mime type */
+  const chooseMimeType = (): string => {
+    const candidates = [
+      "video/webm;codecs=vp9,opus",
+      "video/webm;codecs=vp9",
+      "video/webm;codecs=vp8,opus",
+      "video/webm;codecs=vp8",
+      "video/webm",
+    ];
+    for (const type of candidates) {
+      if ((window as any).MediaRecorder && MediaRecorder.isTypeSupported(type)) {
+        return type;
+      }
+    }
+    return "video/webm";
+  };
+
+  /** Export trimmed (and optionally cropped) clip using Canvas + MediaRecorder */
   const handleExport = async () => {
-    if (!videoFile) {
+    if (!videoRef.current) {
+      setStatusMessage("Please load a video and wait for metadata.");
+      return;
+    }
+    if (!videoFile || !videoUrl) {
       setStatusMessage("Please load a video file first.");
       return;
     }
-    if (!ffmpegReady) {
-      setStatusMessage("Video engine is not ready yet.");
+    if (typeof MediaRecorder === "undefined") {
+      setEngineState("error");
+      setStatusMessage(
+        "MediaRecorder is not supported in this browser. Please use a modern browser such as Chrome or Firefox."
+      );
       return;
     }
     if (duration <= 0) {
@@ -174,50 +280,210 @@ const App: FC = () => {
       return;
     }
 
+    const lengthSeconds = trimEnd - trimStart;
+    if (!Number.isFinite(lengthSeconds) || lengthSeconds <= 0) {
+      setStatusMessage("Trim length is invalid. Please adjust the range.");
+      return;
+    }
+
+    const hasValidCrop =
+      cropRect &&
+      videoWidth &&
+      videoHeight &&
+      cropRect.width > 4 &&
+      cropRect.height > 4;
+
+    if (!videoWidth || !videoHeight) {
+      setStatusMessage(
+        "Video dimensions are not available yet. Please wait a moment and try again."
+      );
+      return;
+    }
+
+    const video = videoRef.current;
+
     try {
       setEngineState("exporting");
-      setStatusMessage("Exporting trimmed clip... This can take some time.");
+      setStatusMessage(
+        hasValidCrop
+          ? "Exporting trimmed and cropped clip in your browser..."
+          : "Exporting trimmed clip in your browser..."
+      );
 
-      // Clean previous outputs if any (new API uses deleteFile)
-      try {
-        await ffmpeg.deleteFile("input.mp4");
-      } catch {
-        // ignore
+      // Create an off-screen canvas for drawing frames
+      const canvas = document.createElement("canvas");
+      if (hasValidCrop && cropRect) {
+        canvas.width = Math.round(cropRect.width);
+        canvas.height = Math.round(cropRect.height);
+      } else {
+        canvas.width = videoWidth;
+        canvas.height = videoHeight;
       }
-      try {
-        await ffmpeg.deleteFile("output.mp4");
-      } catch {
-        // ignore
+
+      const ctx = canvas.getContext("2d");
+      if (!ctx) {
+        setEngineState("error");
+        setStatusMessage("Could not get 2D context from canvas.");
+        return;
       }
 
-      // Write input file into FFmpeg virtual FS
-      const inputBuffer = await videoFile.arrayBuffer();
-      const inputData = new Uint8Array(inputBuffer);
-      await ffmpeg.writeFile("input.mp4", inputData);
+      const fps = 30;
+      const canvasStream = (canvas as any).captureStream
+        ? canvas.captureStream(fps)
+        : null;
 
-      // Prepare arguments
-      const startArg = trimStart.toFixed(2);
-      const lengthSeconds = trimEnd - trimStart;
-      const lengthArg = lengthSeconds.toFixed(2);
+      if (!canvasStream) {
+        setEngineState("error");
+        setStatusMessage(
+          "Canvas captureStream is not supported in this browser."
+        );
+        return;
+      }
 
-      // -ss: start, -t: duration, -c copy: avoid re-encoding when possible
-      await ffmpeg.exec([
-        "-ss",
-        startArg,
-        "-i",
-        "input.mp4",
-        "-t",
-        lengthArg,
-        "-c",
-        "copy",
-        "output.mp4",
-      ]);
+      // Optionally merge audio from the original video (if available)
+      let streamToRecord: MediaStream = canvasStream;
+      try {
+        if (typeof (video as any).captureStream === "function") {
+          const srcStream = (video as any).captureStream() as MediaStream;
+          const composed = new MediaStream();
+          canvasStream.getVideoTracks().forEach((t) => composed.addTrack(t));
+          const audioTracks = srcStream.getAudioTracks();
+          if (audioTracks.length > 0) {
+            audioTracks.forEach((t) => composed.addTrack(t));
+          }
+          streamToRecord = composed;
+        }
+      } catch {
+        // If captureStream fails, fall back to video-only canvas stream
+        streamToRecord = canvasStream;
+      }
 
-      // Read the result
-      const fileData = (await ffmpeg.readFile("output.mp4")) as Uint8Array;
-      const arrayBuffer = fileData.slice().buffer as ArrayBuffer;
-      const blob = new Blob([arrayBuffer], { type: "video/mp4" });
+      const mimeType = chooseMimeType();
+      const recorder = new MediaRecorder(streamToRecord, { mimeType });
 
+      const chunks: BlobPart[] = [];
+
+      recorder.ondataavailable = (event) => {
+        if (event.data && event.data.size > 0) {
+          chunks.push(event.data);
+        }
+      };
+
+      const durationMs = lengthSeconds * 1000;
+
+      // Wrap the recording process into a Promise
+      await new Promise<void>((resolve, reject) => {
+        let stopped = false;
+
+        const handleError = (error: unknown) => {
+          if (stopped) return;
+          stopped = true;
+          recorder.stop();
+          video.pause();
+          reject(error);
+        };
+
+        recorder.onerror = (event) => {
+          handleError(event.error || new Error("MediaRecorder error"));
+        };
+
+        recorder.onstop = () => {
+          if (stopped) return;
+          stopped = true;
+          video.pause();
+          resolve();
+        };
+
+        const startRecording = () => {
+          try {
+            const originalMuted = video.muted;
+            video.muted = true;
+
+            recorder.start();
+
+            const startTime = performance.now();
+            const endTime = startTime + durationMs;
+
+            const drawFrame = (now: number) => {
+              if (now >= endTime || video.currentTime >= trimEnd) {
+                try {
+                  recorder.stop();
+                } catch {
+                  // ignore
+                }
+                video.pause();
+                video.muted = originalMuted;
+                return;
+              }
+
+              const sx = hasValidCrop && cropRect ? cropRect.x : 0;
+              const sy = hasValidCrop && cropRect ? cropRect.y : 0;
+              const sw = hasValidCrop && cropRect ? cropRect.width : videoWidth;
+              const sh =
+                hasValidCrop && cropRect ? cropRect.height : videoHeight;
+
+              ctx.drawImage(
+                video,
+                sx,
+                sy,
+                sw,
+                sh,
+                0,
+                0,
+                canvas.width,
+                canvas.height
+              );
+
+              requestAnimationFrame(drawFrame);
+            };
+
+            const playAndDraw = () => {
+              video
+                .play()
+                .then(() => {
+                  const offset = trimStart - video.currentTime;
+                  if (Math.abs(offset) > 0.05) {
+                    video.currentTime = trimStart;
+                    video.pause();
+                    video
+                      .play()
+                      .then(() => requestAnimationFrame(drawFrame))
+                      .catch(handleError);
+                  } else {
+                    requestAnimationFrame(drawFrame);
+                  }
+                })
+                .catch(handleError);
+            };
+
+            const onSeeked = () => {
+              video.removeEventListener("seeked", onSeeked);
+              playAndDraw();
+            };
+
+            video.pause();
+            video.addEventListener("seeked", onSeeked);
+            video.currentTime = trimStart;
+          } catch (error) {
+            handleError(error);
+          }
+        };
+
+        startRecording();
+      });
+
+      if (chunks.length === 0) {
+        setEngineState("error");
+        setStatusMessage(
+          "Export finished but produced an empty recording. Please try a different trim range or crop."
+        );
+        return;
+      }
+
+      const blob = new Blob(chunks, { type: mimeType });
+      const filename = hasValidCrop
+        ? "trimmed_cropped_clip.webm"
+        : "trimmed_clip.webm";
       const url = URL.createObjectURL(blob);
 
       if (downloadUrl) {
@@ -225,16 +491,22 @@ const App: FC = () => {
       }
       setDownloadUrl(url);
       setEngineState("done");
-      setStatusMessage("Export finished. You can download the trimmed clip.");
+      setStatusMessage(
+        `Export finished. Download should start automatically. If not, use the link below (${filename}).`
+      );
 
-      // Clean up FS
-      await ffmpeg.deleteFile("input.mp4");
-      await ffmpeg.deleteFile("output.mp4");
+      // Auto-download
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
     } catch (error) {
       console.error("Export failed:", error);
       setEngineState("error");
       setStatusMessage(
-        "Failed to export video. Please check the console for details."
+        "Failed to export video using Canvas + MediaRecorder. Please check the console and try again."
       );
     }
   };
@@ -245,7 +517,6 @@ const App: FC = () => {
     let t = videoRef.current.currentTime;
     t = Math.max(0, Math.min(t, duration));
     if (t > trimEnd) {
-      // Do not cross the end handle
       t = trimEnd;
     }
     setTrimStart(t);
@@ -257,7 +528,6 @@ const App: FC = () => {
     let t = videoRef.current.currentTime;
     t = Math.max(0, Math.min(t, duration));
     if (t < trimStart) {
-      // Do not cross the start handle
       t = trimStart;
     }
     setTrimEnd(t);
@@ -266,14 +536,12 @@ const App: FC = () => {
   const repo = "https://github.com/europanite/client_side_video_editor";
 
   // --- Track colors ---
-  // 0 to Start: red, Start to End: blue, End to 100: gray
   const startPercent = duration > 0 ? (trimStart / duration) * 100 : 0;
   const endPercent = duration > 0 ? (trimEnd / duration) * 100 : 0;
 
   const rangeTrackStyle: CSSProperties =
     duration > 0
       ? ({
-          // Custom CSS variable used in style.css
           "--track-gradient": `linear-gradient(to right,
             #4b5563 0%,
             #4b5563 ${startPercent}%,
@@ -284,6 +552,13 @@ const App: FC = () => {
           )`,
         } as CSSProperties)
       : ({} as CSSProperties);
+
+  const hasCropSelection =
+    cropRect &&
+    videoWidth &&
+    videoHeight &&
+    cropRect.width > 4 &&
+    cropRect.height > 4;
 
   return (
     <div className="app-root">
@@ -299,8 +574,8 @@ const App: FC = () => {
           </a>
         </h1>
         <p className="app-subtitle">
-          Load a video file, choose a start and end time, and export a trimmed
-          MP4 clip.
+          Load a video file, set a trim range, drag on the preview to select a
+          crop rectangle, and export a WebM clip.
         </p>
       </header>
 
@@ -325,12 +600,57 @@ const App: FC = () => {
           <h2 className="panel-title">Preview</h2>
           <div className="video-frame">
             {videoUrl ? (
-              <video
-                ref={videoRef}
-                src={videoUrl}
-                controls
-                onLoadedMetadata={handleLoadedMetadata}
-              />
+              <>
+                <video
+                  ref={videoRef}
+                  src={videoUrl}
+                  controls
+                  onLoadedMetadata={handleLoadedMetadata}
+                  onPointerDown={handleCropPointerDown}
+                  onPointerMove={handleCropPointerMove}
+                  onPointerUp={handleCropPointerUp}
+                  onPointerLeave={handleCropPointerLeave}
+                />
+                {/* Visual crop rectangle overlay */}
+                <div
+                  style={{
+                    position: "absolute",
+                    inset: 0,
+                    pointerEvents: "none",
+                  }}
+                  onDoubleClick={handleResetCrop}
+                >
+                  {hasCropSelection && videoWidth && videoHeight && cropRect && (
+                    <div
+                      style={{
+                        position: "absolute",
+                        left: `${(cropRect.x / videoWidth) * 100}%`,
+                        top: `${(cropRect.y / videoHeight) * 100}%`,
+                        width: `${(cropRect.width / videoWidth) * 100}%`,
+                        height: `${(cropRect.height / videoHeight) * 100}%`,
+                        border: "2px solid #f97373",
+                        backgroundColor: "rgba(249, 115, 129, 0.18)",
+                        boxShadow: "0 0 0 1px rgba(15, 23, 42, 0.8)",
+                      }}
+                    />
+                  )}
+                  <div
+                    style={{
+                      position: "absolute",
+                      left: "8px",
+                      bottom: "8px",
+                      padding: "3px 8px",
+                      borderRadius: "999px",
+                      fontSize: "0.7rem",
+                      backgroundColor: "rgba(15, 23, 42, 0.7)",
+                      color: "#e5e7eb",
+                    }}
+                  >
+                    Drag on the video to draw a crop rectangle. Double-click to
+                    reset.
+                  </div>
+                </div>
+              </>
             ) : (
               <div className="video-placeholder">
                 <span>No video loaded.</span>
@@ -343,12 +663,46 @@ const App: FC = () => {
               <span>Total duration: {formatTime(duration)}</span>
             </div>
           )}
+
+          <div
+            style={{
+              marginTop: "8px",
+              display: "flex",
+              gap: "8px",
+              alignItems: "center",
+              flexWrap: "wrap",
+            }}
+          >
+            {hasCropSelection && (
+              <button
+                className="btn btn-secondary"
+                type="button"
+                onClick={handleResetCrop}
+              >
+                Clear crop
+              </button>
+            )}
+            {hasCropSelection && videoWidth && videoHeight && cropRect && (
+              <span
+                style={{
+                  fontSize: "0.8rem",
+                  color: "#9ca3af",
+                }}
+              >
+                Crop:{" "}
+                {`${Math.round(cropRect.width)}×${Math.round(
+                  cropRect.height
+                )} px at (${Math.round(cropRect.x)}, ${Math.round(
+                  cropRect.y
+                )})`}
+              </span>
+            )}
+          </div>
         </section>
 
         <section className="panel panel-controls">
           <h2 className="panel-title">Trim Range</h2>
 
-          {/* Unified dual-handle slider */}
           <div className="trim-widget">
             <div className="trim-values-row">
               <span>Start: {formatTime(trimStart)}</span>
@@ -356,7 +710,6 @@ const App: FC = () => {
             </div>
 
             <div className="trim-slider-wrapper">
-              {/* Start handle (left) - renders the colored track */}
               <input
                 className="trim-slider trim-slider-start"
                 type="range"
@@ -368,7 +721,6 @@ const App: FC = () => {
                 disabled={!videoFile || duration <= 0}
                 style={rangeTrackStyle}
               />
-              {/* End handle (right) - thumb only, track is transparent */}
               <input
                 className="trim-slider trim-slider-end"
                 type="range"
@@ -437,10 +789,12 @@ const App: FC = () => {
             className="btn btn-primary"
             type="button"
             onClick={handleExport}
-            disabled={!videoFile || !ffmpegReady || engineState === "exporting"}
+            disabled={!videoFile || engineState === "exporting"}
           >
             {engineState === "exporting"
               ? "Exporting..."
+              : hasCropSelection
+              ? "Export Trimmed & Cropped Clip"
               : "Export Trimmed Clip"}
           </button>
 
@@ -449,9 +803,13 @@ const App: FC = () => {
               <a
                 className="download-link"
                 href={downloadUrl}
-                download="trimmed_clip.mp4"
+                download={
+                  hasCropSelection
+                    ? "trimmed_cropped_clip.webm"
+                    : "trimmed_clip.webm"
+                }
               >
-                Download trimmed_clip.mp4
+                Download saved clip
               </a>
             </div>
           )}
@@ -460,8 +818,8 @@ const App: FC = () => {
 
       <footer className="app-footer">
         <span>
-          All processing happens inside your browser using FFmpeg.wasm. Large
-          files may take time.
+          All processing happens inside your browser using HTML5 Video, Canvas,
+          and MediaRecorder APIs. No server and no WebAssembly are required.
         </span>
       </footer>
     </div>
