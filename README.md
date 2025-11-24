@@ -73,16 +73,16 @@ frontend_test
 
 ---
 
-## 3. How It Works (Technical Overview)
+## How It Works (Technical Overview)
 
-### 3.1. Tech Stack
+### 1. Tech Stack
 
 - **Frontend:** React + TypeScript + Vite  
 - **Styling:** Plain CSS (`src/style.css`)
 - **Tests:** Jest + ts‑jest  
 - **Container:** Docker / Docker Compose for reproducible dev & tests
 
-### 3.2. Data flow
+### 2. Data flow
 
 1. **File input**
    - User selects/drops a file -> stored as `File` in React state.
