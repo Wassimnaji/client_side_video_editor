@@ -33,8 +33,8 @@ Everything is done with **HTML5 Video + Canvas + MediaRecorder**.
    - Play the video and click:
      - **Use current time as Start**
      - **Use current time as End**
-5. Click **Export**.
-6. Wait until export finishes:
+4. Click **Export**.
+5. Wait until export finishes:
 
 ---
 
