@@ -574,8 +574,7 @@ const App: FC = () => {
           </a>
         </h1>
         <p className="app-subtitle">
-          Load a video file, set a trim range, drag on the preview to select a
-          crop rectangle, and export a WebM clip.
+          Load a video file, set a trim range, drag on the preview to select a crop rectangle, and export a video clip.
         </p>
       </header>
 
